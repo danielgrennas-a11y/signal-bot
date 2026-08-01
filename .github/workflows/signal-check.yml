@@ -1,0 +1,74 @@
+name: OMXS30 signal check
+
+# Runs entirely on GitHub's servers — your Mac does not need to be on.
+#
+# Two schedules:
+#   1. Once a day  -> always sends a status update (HOLD/BUY/SELL)
+#   2. Every hour during weekday trading hours -> pings you the moment a
+#      genuine NEW BUY/SELL signal appears (no repeat spam while it's
+#      still the same signal — state is tracked in signal_state.json,
+#      committed back to the repo after each run)
+#
+# One-time setup:
+#   Settings -> Secrets and variables -> Actions -> New repository secret
+#     TG_BOT_TOKEN = your bot token from BotFather
+#     TG_CHAT_ID   = your Telegram chat id
+#
+#   Settings -> Actions -> General -> Workflow permissions
+#     Set to "Read and write permissions" so the workflow can commit the
+#     state file back to the repo (needed for the dedup logic to work).
+#
+# You can also trigger it manually any time from the "Actions" tab
+# using the "Run workflow" button (workflow_dispatch, below).
+
+on:
+  schedule:
+    - cron: "5 6 * * 1-5"          # 06:05 UTC, Mon-Fri — daily summary
+    - cron: "0 7-16 * * 1-5"       # every hour, 07:00-16:00 UTC, Mon-Fri — signal check
+  workflow_dispatch: {}             # lets you click "Run workflow" manually on GitHub
+
+permissions:
+  contents: write   # needed to commit signal_state.json back to the repo
+
+jobs:
+  check-signal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install yfinance pandas numpy matplotlib requests
+
+      - name: Daily summary (06:05 UTC scheduled run)
+        if: github.event_name == 'schedule' && github.event.schedule == '5 6 * * 1-5'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python3 signal_bot.py --market omxs30 --interval 1d --notify --daily --no-plot --state-file signal_state.json
+
+      - name: Hourly signal check (all other scheduled runs)
+        if: github.event_name == 'schedule' && github.event.schedule != '5 6 * * 1-5'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python3 signal_bot.py --market omxs30 --interval 1d --notify --no-plot --state-file signal_state.json
+
+      - name: Manual run (workflow_dispatch) — always sends a summary
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python3 signal_bot.py --market omxs30 --interval 1d --notify --daily --no-plot --state-file signal_state.json
+
+      - name: Commit updated signal state
+        run: |
+          git config user.name "signal-bot"
+          git config user.email "signal-bot@users.noreply.github.com"
+          git add signal_state.json
+          git diff --staged --quiet || git commit -m "Update signal state [skip ci]"
+          git push
+
